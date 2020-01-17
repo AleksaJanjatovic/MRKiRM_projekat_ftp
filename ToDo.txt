@@ -1,0 +1,5 @@
+Napraviti da se clijent prvo konektuje i onda proslediti isti taj paket na server
+Pogledati kako se parsira paket pojedinacno
+Odraditi proveru da li je password dobar ili ne, i ako jeste kesirati, ako nije dodati na broj pokusaja sifre za datog korisnika i ako broj predje 5 u roku od 1 minut, zabraniti
+	ulaz tog korisnika na 10 minuta
+Pogledaj kako da odredis kolika je velicina paketa
