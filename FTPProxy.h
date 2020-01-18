@@ -5,11 +5,12 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QHostAddress>
+#include <QReadWriteLock>
 
 #define DATA_COMMAND_NUMBER 4
 #define DATA_COMMAND_LENGTH 5
-#define CLIENT_CONTROL_PORT 15024
-#define CLIENT_DATA_PORT 15034
+#define CLIENT_CONTROL_PORT 50002
+#define CLIENT_DATA_PORT 50001
 
 class FTPProxy : public QObject
 {
@@ -26,13 +27,17 @@ public:
     bool connectClientControl();
 
 signals:
-    void ftpDataCommandSignal(quint16 dataPort);
+    void ftpDataCommandSignal();    
 private slots:
     void parseServerToClientControls();
     void parseClientToServerControls();
-//    void activateDataLine(quint16 dataPort);
+    void activateDataLineSlot();
+    void activateDataLineThread();
+    void parseServerToClientData();
+    void parseClientToServerData();
 
 private:
+    QThread *dataThread;
     QByteArray *controlBuffer,
         *dataBuffer;
     QHostAddress *serverAddress,
@@ -47,6 +52,7 @@ private:
         clientDataConnected,
         serverControlConnected,
         serverDataConnected;
+    QReadWriteLock *infoOutputLock;
 
     enum FTPProxyInfo {
         STARTING_SERVER_CONTROL_CONNECTION,
@@ -57,7 +63,12 @@ private:
         CLIENT_CONTROL_CONFIRMATION,
         SERVER_TO_CLIENT_CONTROL_PARSED,
         CLIENT_TO_SERVER_CONTROL_PARSED,
-        DATA_LINE_PASSIVE_STATE
+        ESTABLISHING_DATA_CONNECTION,
+        SERVER_TO_PROXY_DATA_LINE_CONNECTED,
+        PROXY_TO_CLIENT_DATA_LINE_REQUEST_SENT,
+        PROXY_TO_CLIENT_DATA_LINE_CONFIRMED,
+        SERVER_TO_CLIENT_DATA_PARSED,
+        CLIENT_TO_SERVER_DATA_PARSED
     };
 
     const char* returnInfoMessage(FTPProxyInfo infoMessage);
@@ -71,6 +82,8 @@ private:
     bool checkIfPassiveCommand(QByteArray& packet);
     quint16 extractDataPortFromPacketEPSV(QByteArray& packet);
     quint16 extractDataPortFromPacket(QByteArray& packet);
+    void convertPassiveModePacket(QByteArray& packet);
+
 };
 
 #endif // FTPPROXY_H
