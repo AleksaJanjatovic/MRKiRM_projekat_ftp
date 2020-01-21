@@ -9,8 +9,8 @@
 
 #define DATA_COMMAND_NUMBER 4
 #define DATA_COMMAND_LENGTH 5
-#define CLIENT_CONTROL_PORT 50002
-#define CLIENT_DATA_PORT 50001
+#define CLIENT_CONTROL_PORT 50001
+#define CLIENT_DATA_PORT 50101
 
 class FTPProxy : public QObject
 {
@@ -27,7 +27,7 @@ public:
     bool connectClientControl();
 
 signals:
-    void ftpDataCommandSignal();    
+    void ftpDataConnectionOpeningSignal();
 private slots:
     void parseServerToClientControls();
     void parseClientToServerControls();
@@ -42,8 +42,8 @@ private:
         *dataBuffer;
     QHostAddress *serverAddress,
         *clientAddress;
-    QTcpServer *controlTcpServerToClient,
-        *dataTcpServerToClient;
+    QTcpServer *controlTcpProxyToClient,
+        *dataTcpProxyToClient;
     QTcpSocket *clientControlSocket,
         *clientDataSocket,
         *serverControlSocket,
@@ -58,17 +58,26 @@ private:
         STARTING_SERVER_CONTROL_CONNECTION,
         WAITING_FOR_SERVER_CONTROL_RESPONSE,
         STARTING_CLIENT_CONTROL_CONNECTION,
-        WAITING_FOR_CLIENT_CONNECTIONS,
+        WAITING_FOR_CLIENT_CONTROL_CONNECTIONS,
         SERVER_CONTROL_CONFIRMATION,
         CLIENT_CONTROL_CONFIRMATION,
         SERVER_TO_CLIENT_CONTROL_PARSED,
         CLIENT_TO_SERVER_CONTROL_PARSED,
         ESTABLISHING_DATA_CONNECTION,
-        SERVER_TO_PROXY_DATA_LINE_CONNECTED,
-        PROXY_TO_CLIENT_DATA_LINE_REQUEST_SENT,
-        PROXY_TO_CLIENT_DATA_LINE_CONFIRMED,
+        CLIENT_DATA_LINE_CONFIRMATION,
+        WAITING_FOR_SERVER_DATA_RESPONSE,
+        WAITING_FOR_CLIENT_DATA_CONNECTION,
+        SERVER_DATA_LINE_CONFIRMATION,
         SERVER_TO_CLIENT_DATA_PARSED,
-        CLIENT_TO_SERVER_DATA_PARSED
+        CLIENT_TO_SERVER_DATA_PARSED,
+        DATA_LINE_ESTABLISHED,
+        CONTROL_LINE_ESTABLISHED
+    };
+
+    enum FTPServerRepsonse {
+        ENTERING_PASSIVE_MODE = 227,
+        OPENNING_DATA_CHANNEL = 150,
+        RESPONSE_NOT_IMPLEMENTED = 0
     };
 
     const char* returnInfoMessage(FTPProxyInfo infoMessage);
@@ -83,6 +92,7 @@ private:
     quint16 extractDataPortFromPacketEPSV(QByteArray& packet);
     quint16 extractDataPortFromPacket(QByteArray& packet);
     void convertPassiveModePacket(QByteArray& packet);
+    FTPServerRepsonse processServerResponse(QByteArray& packet);
 
 };
 
