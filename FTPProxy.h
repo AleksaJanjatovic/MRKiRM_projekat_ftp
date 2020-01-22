@@ -16,8 +16,9 @@
 #define CLIENT_CONTROL_PORT 50001
 #define CLIENT_DATA_PORT 50101
 
-///////////////////////////////////////CONTROL PARSSER
-class ControlParser : public QObject {
+/*****CONTROL PARSER*****/
+class ControlParser : public QObject
+{
     Q_OBJECT
     public:
         explicit ControlParser(QObject *parent = nullptr);
@@ -58,7 +59,7 @@ class ControlParser : public QObject {
         ServerResponse processServerResponse(QByteArray& packet);
 };
 
-////////////////////////////////////////DATA PARSER
+/*****DATA PARSER*****/
 class DataParser : public QObject {
         Q_OBJECT
     public:
@@ -89,6 +90,7 @@ class DataParser : public QObject {
             dataByteNumberServerToClient;
 };
 
+/*****FTP Proxy*****/
 class FTPProxy : public QObject
 {
     Q_OBJECT
