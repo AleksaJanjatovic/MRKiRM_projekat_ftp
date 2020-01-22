@@ -2,10 +2,21 @@
 #include <QNetworkProxy>
 #include <QtMath>
 #include <QThread>
+#include <QCoreApplication>
 
 quint16 FTPProxy::clientControlPort = CLIENT_CONTROL_PORT;
 quint16 FTPProxy::clientDataPort = CLIENT_DATA_PORT;
 quint16 FTPProxy::serverDataPort = 0;
+QHostAddress* FTPProxy::serverAddress = nullptr;
+QHostAddress* FTPProxy::clientAddress = nullptr;
+
+ControlParser::ControlParser(QObject *parent) : QObject(parent) {
+
+}
+
+DataParser::DataParser(QObject* parent) : QObject(parent) {
+
+}
 
 FTPProxy::FTPProxy(QObject *parent) : QObject(parent)
 {
@@ -16,54 +27,296 @@ FTPProxy::FTPProxy(const char* serverAddress, const char* clientAddress, const q
 {
     this->serverAddress = new QHostAddress(serverAddress);
     this->clientAddress = new QHostAddress(clientAddress);
-    controlBuffer = new QByteArray();
-    dataBuffer = new QByteArray();
     clientControlPort = clControlPort ;
     clientDataPort = clDataPort;
-    infoOutputLock = new QReadWriteLock();
-    connect(this, SIGNAL(ftpDataConnectionOpeningSignal()), this, SLOT(activateDataLineSlot()));
-    dataThread = new QThread();
 
+    controlParser = new ControlParser();
+    dataParser = new DataParser();
+
+    connect(controlParser, SIGNAL(controlLineDisconnectedSignal()), this, SLOT(restartSession()));
+    connect(this, SIGNAL(controlConnectionOpenningSignal()), controlParser, SLOT(activateControlLineThread()));
+    connect(controlParser, SIGNAL(dataConnectionOpenningSignal()), dataParser, SLOT(activateDataLineThread()));
 }
 
-bool FTPProxy::connectServerControl() {
-    qInfo("%s", returnInfoMessage(STARTING_SERVER_CONTROL_CONNECTION));
-    serverControlSocket = new QTcpSocket(this);
-    serverControlSocket->connectToHost(*serverAddress, SERVER_CONTROL_PORT);
-
-    qInfo("\t%s", returnInfoMessage(WAITING_FOR_SERVER_CONTROL_RESPONSE));
-    if(!(serverControlConnected = serverControlSocket->waitForConnected(10000))) {
-        qFatal("%s", (serverControlSocket->errorString()).toStdString().c_str());
-        return false;
-    }
-    connect(serverControlSocket, SIGNAL(readyRead()), this, SLOT(parseServerToClientControls()));
-
-    qInfo("%s", returnInfoMessage(SERVER_CONTROL_CONFIRMATION));
-    return true;
+void ControlParser::convertPassiveModePacket(QByteArray& packet) {
+    packet.truncate(27);
+    packet.append(FTPProxy::serverAddress->toString().replace('.',',') + ',');
+    packet.append(QString::number((FTPProxy::clientDataPort - (FTPProxy::clientDataPort & 0x00FF)) >> 8) + ',');
+    packet.append(QString::number(FTPProxy::clientDataPort & 0x00FF) + ")\r\n");
 }
 
-bool FTPProxy::connectClientControl() {
-    qInfo("%s", returnInfoMessage(STARTING_CLIENT_CONTROL_CONNECTION));
+void ControlParser::activateControlLineThread() {
+    controlThread = new QThread();
+    moveToThread(controlThread);
+    connect(controlThread, SIGNAL(started()), this, SLOT(activateControlLine()));
+    controlThread->start();
+}
+
+void ControlParser::activateControlLine() {
+    controlBuffer = new QByteArray();
+    //STARTING CLIENT CONTROL
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::STARTING_CLIENT_CONTROL_CONNECTION));
 
     controlTcpProxyToClient = new QTcpServer(this);
-    if(!controlTcpProxyToClient->listen(*clientAddress, clientControlPort)) {
+    if(!controlTcpProxyToClient->listen(*FTPProxy::clientAddress, FTPProxy::clientControlPort)) {
         qFatal("%s", controlTcpProxyToClient->errorString().toStdString().c_str());
-        return false;
+        return;
     }
-    qInfo("\t%s", returnInfoMessage(WAITING_FOR_CLIENT_CONTROL_CONNECTIONS));
+    qInfo("\t%s", FTPProxy::returnInfoMessage(FTPProxy::WAITING_FOR_CLIENT_CONTROL_CONNECTIONS));
     if(!(clientControlConnected = controlTcpProxyToClient->waitForNewConnection(-1))) {
         qFatal("%s", (controlTcpProxyToClient->errorString().toStdString().c_str()));
-        return false;
+        return;
     }
     clientControlSocket = controlTcpProxyToClient->nextPendingConnection();
-    connect(clientControlSocket, SIGNAL(readyRead()), this, SLOT(parseClientToServerControls()));
-    qInfo("%s", returnInfoMessage(CLIENT_CONTROL_CONFIRMATION));
+    connect(clientControlSocket, SIGNAL(readyRead()), this, SLOT(parseClientToServerControl()));
+    connect(clientControlSocket, SIGNAL(disconnected()), this, SLOT(disconnectClientControlLine()));
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::CLIENT_CONTROL_CONFIRMATION));
+
+
+    //STARTING SERVER CONTROL;
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::STARTING_SERVER_CONTROL_CONNECTION));
+    serverControlSocket = new QTcpSocket(this);
+    serverControlSocket->connectToHost(*FTPProxy::serverAddress, FTPProxy::SERVER_CONTROL_PORT);
+
+    qInfo("\t%s", FTPProxy::FTPProxy::returnInfoMessage(FTPProxy::WAITING_FOR_SERVER_CONTROL_RESPONSE));
+    if(!(serverControlConnected = serverControlSocket->waitForConnected(10000))) {
+        qFatal("%s", (serverControlSocket->errorString()).toStdString().c_str());
+        return;
+    }
+    connect(serverControlSocket, SIGNAL(readyRead()), this, SLOT(parseServerToClientControl()));
+    connect(serverControlSocket, SIGNAL(disconnected()), this, SLOT(disconnectServerControlLine()));
+
+    qInfo("%s", FTPProxy::FTPProxy::returnInfoMessage(FTPProxy::SERVER_CONTROL_CONFIRMATION));
+
+}
+bool FTPProxy::start() {
+//    bool clientControl, serverControl;
+//    moveToThread(controlThread);
+    while(1) {
+        emit controlConnectionOpenningSignal();
+        QCoreApplication::processEvents(QEventLoop::X11ExcludeTimers);
+        sessionMutex.lock();
+        sessionNotOver.wait(&sessionMutex);
+        sessionMutex.unlock();
+//        delete controlThread;
+    }
     return true;
+}
+
+void DataParser::activateDataLineThread() {
+    dataThread = new QThread();
+    moveToThread(dataThread);
+    connect(dataThread, SIGNAL(started()), this, SLOT(activateDataLine()));
+    dataThread->start();
+}
+
+//bool FTPProxy::connectServerControl() {
+//    qInfo("%s", FTPProxy::FTPProxy::returnInfoMessage(STARTING_SERVER_CONTROL_CONNECTION));
+//    serverControlSocket = new QTcpSocket(this);
+//    serverControlSocket->connectToHost(*serverAddress, SERVER_CONTROL_PORT);
+
+//    qInfo("\t%s", FTPProxy::FTPProxy::returnInfoMessage(WAITING_FOR_SERVER_CONTROL_RESPONSE));
+//    if(!(serverControlConnected = serverControlSocket->waitForConnected(10000))) {
+//        qFatal("%s", (serverControlSocket->errorString()).toStdString().c_str());
+//        return false;
+//    }
+//    connect(serverControlSocket, SIGNAL(readyRead()), this, SLOT(parseServerToClientControls()));
+//    connect(serverControlSocket, SIGNAL(disconnected()), this, SLOT(disconnectServerControl()));
+
+//    qInfo("%s", FTPProxy::FTPProxy::returnInfoMessage(SERVER_CONTROL_CONFIRMATION));
+//    return true;
+//}
+
+//bool FTPProxy::connectClientControl() {
+//    qInfo("%s", FTPProxy::FTPProxy::returnInfoMessage(STARTING_CLIENT_CONTROL_CONNECTION));
+
+//    controlTcpProxyToClient = new QTcpServer(this);
+//    if(!controlTcpProxyToClient->listen(*clientAddress, clientControlPort)) {
+//        qFatal("%s", controlTcpProxyToClient->errorString().toStdString().c_str());
+//        return false;
+//    }
+//    qInfo("\t%s", FTPProxy::FTPProxy::returnInfoMessage(WAITING_FOR_CLIENT_CONTROL_CONNECTIONS));
+//    if(!(clientControlConnected = controlTcpProxyToClient->waitForNewConnection(-1))) {
+//        qFatal("%s", (controlTcpProxyToClient->errorString().toStdString().c_str()));
+//        return false;
+//    }
+//    clientControlSocket = controlTcpProxyToClient->nextPendingConnection();
+//    connect(clientControlSocket, SIGNAL(readyRead()), this, SLOT(parseClientToServerControls()));
+//    connect(clientControlSocket, SIGNAL(disconnected()), this, SLOT(disconnectClientControl()));
+
+//    qInfo("%s", FTPProxy::FTPProxy::returnInfoMessage(CLIENT_CONTROL_CONFIRMATION));
+//    return true;
+//}
+
+//void FTPProxy::activateControlLineThread() {
+//    controlThread = new QThread();
+//    connect(controlThread, SIGNAL(started()), this, SLOT(activateControlLine()));
+//    controlThread->start();
+//}
+
+void ControlParser::parseClientToServerControl() {
+    *controlBuffer = clientControlSocket->readAll();
+    controlByteNumberClientToServer += controlBuffer->size();
+    serverControlSocket->write(*controlBuffer);
+    controlByteNumberClientToServer -= controlBuffer->size();
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::CLIENT_TO_SERVER_CONTROL_PARSED));
+    qDebug(*controlBuffer);
+    controlBuffer->clear();
+//    serverControlSocket->flush();
+}
+
+void ControlParser::parseServerToClientControl() {
+    *controlBuffer = serverControlSocket->readAll();
+    processServerResponse(*controlBuffer);
+    controlByteNumberServerToClient += controlBuffer->size();
+    clientControlSocket->write(*controlBuffer);
+    controlByteNumberServerToClient -= controlBuffer->size();
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::SERVER_TO_CLIENT_CONTROL_PARSED));
+    qDebug(*controlBuffer);
+    controlBuffer->clear();
+//    clientControlSocket->flush();
+}
+
+ControlParser::ServerResponse ControlParser::processServerResponse(QByteArray& packet) {
+    QString serverResponse;
+    serverResponse.push_back(packet.at(0));
+    serverResponse.push_back(packet.at(1));
+    serverResponse.push_back(packet.at(2));
+    quint16 serverResponseCode = serverResponse.toUInt();
+    switch (serverResponseCode) {
+    case ENTERING_PASSIVE_MODE:
+        FTPProxy::serverDataPort = extractDataPortFromPacket(packet);
+        convertPassiveModePacket(packet);
+        emit dataConnectionOpenningSignal();
+        return ENTERING_PASSIVE_MODE;
+    case OPENNING_DATA_CHANNEL:
+        return OPENNING_DATA_CHANNEL;
+    default:
+        return RESPONSE_NOT_IMPLEMENTED;
+    }
+}
+
+quint16 ControlParser::extractDataPortFromPacket(QByteArray& packet) {
+    QString stringForSplitting(packet);
+    QStringList stringList = stringForSplitting.split(",");
+    QString portSecondPart = stringList.at(5);
+    portSecondPart.truncate(portSecondPart.indexOf(')'));
+    return portSecondPart.toUInt() + (stringList.at(4).toUInt() << 8);
+}
+
+void DataParser::activateDataLine() {
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::ESTABLISHING_DATA_CONNECTION));
+    dataTcpProxyToClient = new QTcpServer();
+
+    qInfo("\t%s", FTPProxy::returnInfoMessage(FTPProxy::WAITING_FOR_CLIENT_DATA_CONNECTION));
+    dataTcpProxyToClient->listen(*clientAddress, FTPProxy::clientDataPort);
+    if(!(clientDataConnected = dataTcpProxyToClient->waitForNewConnection(-1))) {
+        qFatal("%s", dataTcpProxyToClient->errorString().toStdString().c_str());
+        return;
+    }
+    clientDataSocket = dataTcpProxyToClient->nextPendingConnection();
+    qDebug("Client Port: %d", clientDataSocket->localPort());
+    qInfo("\t%s", FTPProxy::returnInfoMessage(FTPProxy::CLIENT_DATA_LINE_CONFIRMATION));
+
+    qInfo("\t%s", FTPProxy::returnInfoMessage(FTPProxy::WAITING_FOR_SERVER_DATA_RESPONSE));
+    serverDataSocket = new QTcpSocket();
+    serverDataSocket->connectToHost(*serverAddress, FTPProxy::serverDataPort);
+    if(!(serverDataConnected = serverDataSocket->waitForConnected(10000))) {
+        qFatal("%s", serverDataSocket->errorString().toStdString().c_str());
+        return;
+    }
+    qInfo("\t%s", FTPProxy::returnInfoMessage(FTPProxy::SERVER_DATA_LINE_CONFIRMATION));
+
+    connect(serverDataSocket, SIGNAL(readyRead()), this, SLOT(parseServerToClientData()));
+    connect(serverDataSocket, SIGNAL(disconnected()), this, SLOT(disconnectServerDataLine()));
+    connect(clientDataSocket, SIGNAL(bytesWritten(qint64)), this, SLOT(disconnectClientDataLine(qint64)));
+    connect(clientDataSocket, SIGNAL(readyRead()), this, SLOT(parseClientToServerData()));
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::DATA_LINE_ESTABLISHED));
+}
+
+//void FTPProxy::activateDataLineThread() {
+//    qInfo("%s", FTPProxy::FTPProxy::returnInfoMessage(ESTABLISHING_DATA_CONNECTION));
+//    dataThread = new QThread();
+//    connect(dataThread, SIGNAL(started()), this, SLOT(activateDataLine()));
+//    dataThread->start();
+//}
+
+void DataParser::parseClientToServerData() {
+    dataBufferClientToServer = new QByteArray();
+
+    *dataBufferClientToServer = clientDataSocket->readAll();
+    dataByteNumberClientToServer += dataBufferClientToServer->size();
+
+    serverDataSocket->write(*dataBufferClientToServer);
+    dataByteNumberClientToServer -= dataBufferClientToServer->size();
+
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::CLIENT_TO_SERVER_DATA_PARSED));
+    //serverDataSocket->flush();
+    delete dataBufferClientToServer;
+}
+
+void DataParser::parseServerToClientData() {
+    dataBufferServerToClient = new QByteArray();
+
+    *dataBufferServerToClient = serverDataSocket->readAll();
+    dataByteNumberServerToClient += dataBufferServerToClient->size();
+
+    clientDataSocket->write(*dataBufferServerToClient);
+    dataByteNumberServerToClient -= dataBufferServerToClient->size();
+
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::SERVER_TO_CLIENT_DATA_PARSED));
+    //clientDataSocket->flush();
+    delete dataBufferServerToClient;
+}
+
+void DataParser::disconnectServerDataLine() {
+    serverDataConnected = false;
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::SERVER_DATA_LINE_DISCONNECTED));
+}
+
+void DataParser::disconnectClientDataLine(qint64 dummy) {
+    if (!serverDataConnected && dataByteNumberServerToClient == 0) {
+        clientDataConnected = false;
+        clientDataSocket->disconnectFromHost();
+        dataTcpProxyToClient->deleteLater();
+        serverDataSocket->deleteLater();
+        clientDataSocket->deleteLater();
+        qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::CLIENT_DATA_LINE_DISCONNECTED));
+        dataThread->quit();
+    }
+}
+
+void ControlParser::disconnectServerControlLine() {
+    serverControlConnected = false;
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::SERVER_CONTROL_DISCONNECTED));
+}
+
+void ControlParser::disconnectClientControlLine() {
+    clientControlConnected = false;
+    clientControlSocket->deleteLater();
+    serverControlSocket->deleteLater();
+    controlTcpProxyToClient->deleteLater();
+
+    qInfo("%s", FTPProxy::returnInfoMessage(FTPProxy::CLIENT_CONTROL_DISCONNECTED));
+    controlThread->quit();
+}
+
+void FTPProxy::restartSession() {
+    sessionNotOver.wakeOne();
 }
 
 const char* FTPProxy::returnInfoMessage(FTPProxyInfo infoMessage) {
-    QReadLocker readLocker(infoOutputLock);
+    QReadWriteLock infoOutputLock;
+    QReadLocker readLocker(&infoOutputLock);
     switch(infoMessage) {
+    case FTPProxy::SERVER_DATA_LINE_DISCONNECTED:
+        return "Server To Proxy Data Line Disconnected.";
+    case FTPProxy::CLIENT_DATA_LINE_DISCONNECTED:
+        return "Client To Proxy Data Line Disconnected.";
+    case FTPProxy::SERVER_CONTROL_DISCONNECTED:
+        return "Server To Proxy Control Disconnected.";
+    case FTPProxy::CLIENT_CONTROL_DISCONNECTED:
+        return "Client To Proxy Control Disconnected.";
     case FTPProxy::WAITING_FOR_SERVER_DATA_RESPONSE:
         return "Waiting For Server Data Line Response...";
     case FTPProxy::DATA_LINE_ESTABLISHED:
@@ -102,138 +355,4 @@ const char* FTPProxy::returnInfoMessage(FTPProxyInfo infoMessage) {
     return "None";
 }
 
-void FTPProxy::parseClientToServerControls() {
-    //QThread::msleep(5);
-    *controlBuffer = clientControlSocket->readAll();
-    serverControlSocket->write(*controlBuffer);
-    qDebug(*controlBuffer);
-    qInfo("%s", returnInfoMessage(CLIENT_TO_SERVER_CONTROL_PARSED));
-    controlBuffer->clear();
-    serverControlSocket->flush();
-}
 
-void FTPProxy::parseServerToClientControls() {
-    //QThread::msleep(5);
-    *controlBuffer = serverControlSocket->readAll();
-    qDebug(*controlBuffer);
-    processServerResponse(*controlBuffer);
-    clientControlSocket->write(*controlBuffer);
-    qInfo("%s", returnInfoMessage(SERVER_TO_CLIENT_CONTROL_PARSED));
-    controlBuffer->clear();
-    clientControlSocket->flush();
-}
-
-bool FTPProxy::checkIfDataCommand(QByteArray& packet) {
-    QString dataCommandStr;
-    int i;
-    for (i = 0; i < 4; i++)
-        dataCommandStr.push_back(packet.at(PACKET_COMMAND_OFFSET + i));
-
-    for (i = 0; i < 4; i++)
-        if (!dataCommandStr.compare(dataCommandStr))
-            return true;
-    return false;
-}
-
-FTPProxy::FTPServerRepsonse FTPProxy::processServerResponse(QByteArray& packet) {
-    QString serverResponse;
-    serverResponse.push_back(packet.at(0));
-    serverResponse.push_back(packet.at(1));
-    serverResponse.push_back(packet.at(2));
-    quint16 serverResponseCode = serverResponse.toUInt();
-    switch (serverResponseCode) {
-    case FTPProxy::ENTERING_PASSIVE_MODE:
-        serverDataPort = extractDataPortFromPacket(packet);
-        convertPassiveModePacket(packet);
-        emit ftpDataConnectionOpeningSignal();
-        return ENTERING_PASSIVE_MODE;
-    case FTPProxy::OPENNING_DATA_CHANNEL:
-        return OPENNING_DATA_CHANNEL;
-    default:
-        return RESPONSE_NOT_IMPLEMENTED;
-    }
-}
-
-bool FTPProxy::checkIfPassiveCommand(QByteArray& packet) {
-    QString pasv("227");
-    QString packetCommand;
-    packetCommand.push_back(packet.at(0));
-    packetCommand.push_back(packet.at(1));
-    packetCommand.push_back(packet.at(2));
-    if (!packetCommand.compare(pasv))
-        return true;
-    return false;
-}
-
-quint16 FTPProxy::extractDataPortFromPacketEPSV(QByteArray& packet) {
-    QString portArray;
-    for(int i = 0; i < 5; i++)
-        if(portArray.at(PACKET_PORT_OFFSET + i) != '|')
-            portArray.push_back(packet.at(PACKET_PORT_OFFSET + i));
-        else break;
-    return portArray.toUInt();
-}
-
-quint16 FTPProxy::extractDataPortFromPacket(QByteArray& packet) {
-    QString stringForSplitting(packet);
-    QStringList stringList = stringForSplitting.split(",");
-    QString portSecondPart = stringList.at(5);
-    portSecondPart.truncate(portSecondPart.indexOf(')'));
-    return portSecondPart.toUInt() + (stringList.at(4).toUInt() << 8);
-}
-
-void FTPProxy::activateDataLineThread() {
-    qInfo("%s", returnInfoMessage(ESTABLISHING_DATA_CONNECTION));
-    dataTcpProxyToClient = new QTcpServer();
-
-    qInfo("\t%s", returnInfoMessage(WAITING_FOR_CLIENT_DATA_CONNECTION));
-    dataTcpProxyToClient->listen(*clientAddress, clientDataPort);
-    if(!(clientDataConnected = dataTcpProxyToClient->waitForNewConnection(-1))) {
-        qFatal("%s", dataTcpProxyToClient->errorString().toStdString().c_str());
-        return;
-    }
-    clientDataSocket = dataTcpProxyToClient->nextPendingConnection();
-    qInfo("\t%s", returnInfoMessage(CLIENT_DATA_LINE_CONFIRMATION));
-
-    qInfo("\t%s", returnInfoMessage(WAITING_FOR_SERVER_DATA_RESPONSE));
-    serverDataSocket = new QTcpSocket();
-    serverDataSocket->connectToHost(*serverAddress, serverDataPort);
-    if(!(serverDataConnected = serverDataSocket->waitForConnected(10000))) {
-        qFatal("%s", serverDataSocket->errorString().toStdString().c_str());
-        return;
-    }
-    qInfo("\t%s", returnInfoMessage(SERVER_DATA_LINE_CONFIRMATION));
-
-    qInfo("%s", returnInfoMessage(DATA_LINE_ESTABLISHED));
-    connect(serverDataSocket, SIGNAL(readyRead()), this, SLOT(parseServerToClientData()));
-    connect(clientDataSocket, SIGNAL(readyRead()), this, SLOT(parseClientToServerData()));
-}
-
-void FTPProxy::activateDataLineSlot() {
-    //moveToThread(dataThread);
-    connect(dataThread, SIGNAL(started()), this, SLOT(activateDataLineThread()));
-    dataThread->start();
-}
-
-void FTPProxy::convertPassiveModePacket(QByteArray& packet) {
-    packet.truncate(27);
-    packet.append(serverAddress->toString().replace('.',',') + ',');
-    packet.append(QString::number((clientDataPort - (clientDataPort & 0x00FF)) >> 8) + ',');
-    packet.append(QString::number(clientDataPort & 0x00FF) + ")\r\n");
-}
-
-void FTPProxy::parseClientToServerData() {
-    *dataBuffer = clientDataSocket->readAll();
-    serverDataSocket->write(*dataBuffer);
-    qInfo("%s", returnInfoMessage(CLIENT_TO_SERVER_DATA_PARSED));
-    serverDataSocket->flush();
-    dataBuffer->clear();
-}
-
-void FTPProxy::parseServerToClientData() {
-    *dataBuffer = serverDataSocket->readAll();
-    clientDataSocket->write(*dataBuffer);
-    qInfo("%s", returnInfoMessage(SERVER_TO_CLIENT_DATA_PARSED));
-    clientDataSocket->flush();
-    dataBuffer->clear();
-}
