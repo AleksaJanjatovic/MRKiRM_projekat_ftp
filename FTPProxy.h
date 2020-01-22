@@ -7,7 +7,9 @@
 #include <QHostAddress>
 #include <QReadWriteLock>
 #include <QWaitCondition>
+#include <QSemaphore>
 #include <QMutex>
+#include <QThread>
 
 #define DATA_COMMAND_NUMBER 4
 #define DATA_COMMAND_LENGTH 5
@@ -22,6 +24,7 @@ class ControlParser : public QObject {
     signals:
         void dataConnectionOpenningSignal();
         void controlLineDisconnectedSignal();
+        void restartSession();
     public slots:
         void activateControlLineThread();
     private slots:
@@ -61,7 +64,6 @@ class DataParser : public QObject {
     public:
         explicit DataParser(QObject *parent = nullptr);
     signals:
-        void dataConnectionOpenningSignal();
         void dataLineDisconnectedSignal();
     public slots:
         void activateDataLineThread();
@@ -72,6 +74,7 @@ class DataParser : public QObject {
         void disconnectServerDataLine();
         void disconnectClientDataLine(qint64 dummy);
     private:
+
         QThread* dataThread;
         QByteArray *dataBufferServerToClient,
             *dataBufferClientToServer;
@@ -98,7 +101,6 @@ public:
     static quint16 serverDataPort;
     static QHostAddress* clientAddress,
         *serverAddress;
-    bool start();
 
     enum FTPProxyInfo {
         STARTING_SERVER_CONTROL_CONNECTION,
@@ -125,12 +127,11 @@ public:
     };
     static const char* returnInfoMessage(FTPProxyInfo infoMessage);
 
-
 signals:
     void dataConnectionOpenningSignal();
     void controlConnectionOpenningSignal();
-private slots:
-    void restartSession();
+public slots:
+    void start();
 
 private:
     ControlParser* controlParser;
